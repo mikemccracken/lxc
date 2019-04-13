@@ -74,9 +74,11 @@ static struct option long_options[] = {
 	    { "version",     no_argument,       0, OPT_VERSION },
 	    { "quiet",       no_argument,       0, 'q'         },
 	    { "lxcpath",     required_argument, 0, 'P'         },
+            { "exec-wait",   no_argument,       0, 'w'         },
+            { "keep-stdfds", no_argument,       0, 'k'         },
 	    { 0,             0,                 0, 0           }
 	};
-static const char short_options[] = "n:hqo:l:P:";
+static const char short_options[] = "n:hqo:l:P:wk";
 
 struct arguments {
 	const struct option *options;
@@ -85,6 +87,9 @@ struct arguments {
 	const char *name;
 	bool quiet;
 	const char *lxcpath;
+
+	bool exec_wait;
+	bool keep_stdfds;
 
 	/* remaining arguments */
 	char *const *argv;
@@ -331,6 +336,33 @@ int main(int argc, char *argv[])
 
 		(void)ioctl(STDIN_FILENO, TIOCSCTTY, 0);
 
+		if (my_args.exec_wait) {
+			// wait by doing a blocking write to /syncfifo
+			struct stat fifo_stat;
+			if (stat("/syncfifo", &fifo_stat) == -1){
+				perror("stat");
+				exit(EXIT_FAILURE);
+			}
+			if (!S_ISFIFO(fifo_stat.st_mode)){
+				if (!my_args.quiet) fprintf(stderr, "/syncfifo exists but is not a fifo");
+				exit(EXIT_FAILURE);
+
+			}
+
+			int syncfifo_fd = open("/syncfifo", O_WRONLY | O_NOFOLLOW);
+			if (syncfifo_fd == -1){
+				exit(EXIT_FAILURE);
+			}
+			char ready[6] = "Ready\n";
+			ssize_t wrote = write(syncfifo_fd, ready, strlen(ready));
+			if (wrote == -1){
+				perror("write");
+				close(syncfifo_fd);
+				exit(EXIT_FAILURE);
+			}
+			close(syncfifo_fd);
+		}
+
 		ret = execvp(my_args.argv[0], my_args.argv);
 		if (my_args.quiet)
 			fprintf(stderr, "Failed to exec \"%s\"\n", my_args.argv[0]);
@@ -357,9 +389,11 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	/* No need of other inherited fds but stderr. */
-	close(STDIN_FILENO);
-	close(STDOUT_FILENO);
+	if (!my_args.keep_stdfds){
+		/* No need of other inherited fds but stderr. */
+		close(STDIN_FILENO);
+		close(STDOUT_FILENO);
+	}
 
 	for (;;) {
 		int status;
@@ -452,7 +486,7 @@ __noreturn static void print_usage_exit(const struct option longopts[])
 
 {
 	fprintf(stderr, "Usage: lxc-init [-n|--name=NAME] [-h|--help] [--usage] [--version]\n\
-		[-q|--quiet] [-P|--lxcpath=LXCPATH]\n");
+		[-q|--quiet] [-P|--lxcpath=LXCPATH] [-w|--exec-wait] [-k|--keep-stdfds]\n");
 	exit(EXIT_SUCCESS);
 }
 
@@ -473,6 +507,8 @@ Options :\n\
   -n, --name=NAME                  NAME of the container\n\
   -q, --quiet                      Don't produce any output\n\
   -P, --lxcpath=PATH               Use specified container path\n\
+  -w, --exec-wait                  Wait for external signal to run COMMAND\n\
+  -k, --keep-stdfds                Don't close inherited stdout and stdin\n\
   -?, --help                       Give this help list\n\
       --usage                      Give a short usage message\n\
       --version                    Print the version number\n\
@@ -507,6 +543,12 @@ static int arguments_parse(struct arguments *args, int argc,
 		case 'P':
 			remove_trailing_slashes(optarg);
 			args->lxcpath = optarg;
+			break;
+		case 'w':
+			args->exec_wait = true;
+			break;
+		case 'k':
+			args->keep_stdfds = true;
 			break;
 		case OPT_USAGE:
 			print_usage_exit(args->options);
